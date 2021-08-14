@@ -31,7 +31,8 @@ using namespace std;
 
 
 HRESULT deviceInit();
-void update();
+HRESULT update();
+HRESULT deviceRelease();
 
 enum Channel{
 		CHANNEL_FL,
@@ -61,6 +62,14 @@ IAudioClient*			m_clAudio;
 IAudioCaptureClient*	m_clCapture;
 Format					m_format;
 LARGE_INTEGER			m_pcFill;
+LARGE_INTEGER			m_pcPoll;
+double					m_rms[MAX_CHANNELS];		// current RMS levels
+double					m_peak[MAX_CHANNELS];		// current peak levels
+double					m_pcMult;
+float					m_kRMS[2];					// RMS attack/decay filter constants
+float					m_kPeak[2];					// peak attack/decay filter constants
+float					m_kFFT[2];
+int						m_fftSize =0;
 
 
 int main(int argc,char* argv[]) {
@@ -79,17 +88,29 @@ int main(int argc,char* argv[]) {
 	res = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&m_enum);
     if ( res == S_OK){
 		deviceInit();
-		return 0;
 	}
 	while(cin.get() != 'x'){
 		//poll data and update values
 		//wait for x to stop
-		update();
+		if(update() != S_OK) break;
 	}
 	CoUninitialize();
+	return 0;
 } 
 HRESULT deviceInit(){
-    //assert(m_enum);
+	//initializing values
+	m_kRMS[0] = 0.0f;
+	m_kRMS[1] = 0.0f;
+	m_kPeak[0] = 0.0f;
+	m_kPeak[1] = 0.0f;
+	for (int iChan = 0; iChan < MAX_CHANNELS; ++iChan){
+			m_rms[iChan] = 0.0;
+			m_peak[iChan] = 0.0;
+			/*m_fftCfg[iChan] = NULL;
+			m_fftIn[iChan] = NULL;
+			m_fftOut[iChan] = NULL;
+			m_bandOut[iChan] = NULL;*/
+	}
     HRESULT hr;
     hr = m_enum->GetDefaultAudioEndpoint(eRender,eConsole,&m_dev);
     EXIT_ON_ERROR(hr);
@@ -155,7 +176,7 @@ HRESULT deviceInit(){
     return S_OK;
 }
 
-void update(){
+HRESULT update(){
 	LARGE_INTEGER pcCur;
 	QueryPerformanceCounter(&pcCur);
 	if(m_clCapture /*&& (pcCur.QuadPart - m_pcPoll.QuadPart) * m_pcMult) >= QUERY_TIMEOUT*/){
@@ -163,6 +184,60 @@ void update(){
 		UINT32 nFrames;
 		DWORD flags;
 		UINT64 pos;
+		HRESULT hr;
+
+		while((hr=m_clCapture->GetBuffer(&buffer, &nFrames, &flags, &pos, NULL)) == S_OK){
+			//temp buffers for rms and peak for processing
+			float rms[MAX_CHANNELS];
+			float peak[MAX_CHANNELS];
+			for (int i = 0; i < MAX_CHANNELS; i++){
+				rms[i] = (float)m_rms[i];
+				peak[i] = (float)m_peak[i];
+			}
+			if(m_format == FMT_PCM_F32){
+				float* s = (float*) buffer;
+				//add other channel conditions later
+				if(m_wfx->nChannels == 2){
+					for(unsigned int i = 0; i < nFrames; i++){
+						float xL = (float)*s++;
+						float xR = (float)*s++;
+						float sqrL = xL * xL;
+						float sqrR = xR * xR;
+						float absL = abs(xL);
+						float absR = abs(xR);
+						rms[0] = sqrL + m_kRMS[(sqrL < rms[0])] * (rms[0] - sqrL);
+						rms[1] = sqrR + m_kRMS[(sqrR < rms[1])] * (rms[1] - sqrR);
+						peak[0] = absL + m_kPeak[(absL < peak[0])] * (peak[0] - absL);
+						peak[1] = absR + m_kPeak[(absR < peak[1])] * (peak[1] - absR);
+					}
+				}
+				else{
+					LOG(ERROR) << "Invalid number of channels";
+					return E_INVALIDARG;
+				}
+			}
+			else{
+				LOG(ERROR) << "Invalid format for audio";
+				return E_INVALIDARG;
+			}
+			for( int i = 0; i < MAX_CHANNELS; i++){
+				m_rms[i] = rms[i];
+				m_peak[i] = peak[i];
+			}
+			if(m_fftSize){
+				LOG(INFO) << "Made it to fft calculations";
+			}
+			m_clCapture->ReleaseBuffer(nFrames);
+			m_pcFill = pcCur;
+		}
+		switch(hr){
+			case AUDCLNT_E_BUFFER_ERROR:
+			case AUDCLNT_E_DEVICE_INVALIDATED:
+			case AUDCLNT_E_SERVICE_NOT_RUNNING:
+				deviceRelease();
+				break;
+		}
 		
 	}
+	return S_OK;
 }
