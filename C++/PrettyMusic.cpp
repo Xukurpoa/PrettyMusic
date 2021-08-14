@@ -5,6 +5,7 @@ INITIALIZE_EASYLOGGINGPP
 using namespace std;
 
 
+
 int main(int argc,char* argv[]) {
     START_EASYLOGGINGPP(argc, argv);
     /*vector<string> msg {"Hello", "C++", "World", "from", "VS Code", "and the C++ extension!"};
@@ -15,6 +16,7 @@ int main(int argc,char* argv[]) {
     }
     cout << endl;*/
     LOG(INFO) << "My first info log using default logger";
+	
 
 	HRESULT res = CoInitializeEx(NULL,COINIT_MULTITHREADED);
 	LOG_IF(res != S_OK,ERROR) << "Could not cointialize the com model";
@@ -22,6 +24,7 @@ int main(int argc,char* argv[]) {
     if ( res == S_OK){
 		deviceInit();
 	}
+	setValues();
 	while(cin.get() != 'x'){
 		//poll data and update values
 		//wait for x to stop
@@ -32,18 +35,7 @@ int main(int argc,char* argv[]) {
 } 
 HRESULT deviceInit(){
 	//initializing values
-	m_kRMS[0] = 0.0f;
-	m_kRMS[1] = 0.0f;
-	m_kPeak[0] = 0.0f;
-	m_kPeak[1] = 0.0f;
-	for (int iChan = 0; iChan < MAX_CHANNELS; ++iChan){
-			m_rms[iChan] = 0.0;
-			m_peak[iChan] = 0.0;
-			/*m_fftCfg[iChan] = NULL;
-			m_fftIn[iChan] = NULL;
-			m_fftOut[iChan] = NULL;
-			m_bandOut[iChan] = NULL;*/
-	}
+	
     HRESULT hr;
     hr = m_enum->GetDefaultAudioEndpoint(eRender,eConsole,&m_dev);
     EXIT_ON_ERROR(hr);
@@ -112,7 +104,7 @@ HRESULT deviceInit(){
 HRESULT update(){
 	LARGE_INTEGER pcCur;
 	QueryPerformanceCounter(&pcCur);
-	if(m_clCapture /*&& (pcCur.QuadPart - m_pcPoll.QuadPart) * m_pcMult) >= QUERY_TIMEOUT*/){
+	if(m_clCapture && (((pcCur.QuadPart - m_pcPoll.QuadPart) * m_pcMult) >= QUERY_TIMEOUT)){
 		BYTE* buffer;
 		UINT32 nFrames;
 		DWORD flags;
@@ -156,6 +148,7 @@ HRESULT update(){
 			for( int i = 0; i < MAX_CHANNELS; i++){
 				m_rms[i] = rms[i];
 				m_peak[i] = peak[i];
+				//LOG(INFO) << m_rms[i] << "," << m_peak[i] << "\n";
 			}
 			if(m_fftSize){
 				LOG(INFO) << "Made it to fft calculations";
@@ -170,7 +163,48 @@ HRESULT update(){
 				//deviceRelease();
 				break;
 		}
+
+		LOG(INFO) << CLAMP01((sqrt(m_rms[0]) + sqrt(m_rms[1])) * 0.5 *m_gainRMS) << "\n";
 		
 	}
 	return S_OK;
+}
+
+void setValues(){
+	m_kRMS[0] = 0.0f;
+	m_kRMS[1] = 0.0f;
+	m_kPeak[0] = 0.0f;
+	m_kPeak[1] = 0.0f;
+	for (int iChan = 0; iChan < MAX_CHANNELS; ++iChan){
+			m_rms[iChan] = 0.0;
+			m_peak[iChan] = 0.0;
+			/*m_fftCfg[iChan] = NULL;
+			m_fftIn[iChan] = NULL;
+			m_fftOut[iChan] = NULL;
+			m_bandOut[iChan] = NULL;*/
+	}
+	QueryPerformanceFrequency(&pcFreq);
+	m_pcMult = 1.0 / (double)pcFreq.QuadPart;
+	QueryPerformanceCounter(&m_pcPoll);
+	m_envRMS[0] = 100;
+	m_envRMS[1] = 300;
+	m_envPeak[0] = 50;
+	m_envPeak[1] = 50;
+	m_envFFT[0] = 50;
+	m_envFFT[1] = 50;
+	m_fftOverlap = 0;
+	m_nBands = 100;
+	m_gainRMS = 15;
+	if(m_wfx){
+		const double freq = m_wfx->nSamplesPerSec;
+		m_kRMS[0] = (float) exp(log10(0.01) / (freq * (double) m_envRMS[0] * 0.001));
+		m_kRMS[1] = (float) exp(log10(0.01) / (freq * (double) m_envRMS[1] * 0.001));
+		m_kPeak[0] = (float) exp(log10(0.01) / (freq * (double) m_envPeak[1] * 0.001));
+		m_kPeak[1] = (float) exp(log10(0.01) / (freq * (double) m_envPeak[1] * 0.001));
+		if (m_fftSize)
+			{
+				m_kFFT[0] = (float) exp(log10(0.01) / (freq / (m_fftSize-m_fftOverlap) * (double)m_envFFT[0] * 0.001));
+				m_kFFT[1] = (float) exp(log10(0.01) / (freq / (m_fftSize-m_fftOverlap) * (double)m_envFFT[1] * 0.001));
+			}
+	}
 }

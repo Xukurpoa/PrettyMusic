@@ -6,3 +6,5 @@ C++/kiss_fft130/*
 *.ilk
 .vscode/*
 C++/include/easylogging++.h
+C++/easylogging++.cpp
+myeasylog.log
