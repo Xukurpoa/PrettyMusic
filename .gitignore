@@ -1,0 +1,8 @@
+jawn
+*.obj
+*.exe
+*.pdb
+C++/kiss_fft130/*
+*.ilk
+.vscode/*
+C++/include/easylogging++.h
