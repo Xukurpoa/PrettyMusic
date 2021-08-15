@@ -53,8 +53,7 @@ HRESULT deviceInit(){
     //Probably not needed but just for safety sake
     switch (m_wfx->wFormatTag){
 	case WAVE_FORMAT_PCM:
-		if (m_wfx->wBitsPerSample == 16)
-		{
+		if (m_wfx->wBitsPerSample == 16){
 			m_format = FMT_PCM_S16;
 		}
 		break;
@@ -64,14 +63,45 @@ HRESULT deviceInit(){
 		break;
 
 	case WAVE_FORMAT_EXTENSIBLE:
-		if (reinterpret_cast<WAVEFORMATEXTENSIBLE*>(m_wfx)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)
-		{
+		if (reinterpret_cast<WAVEFORMATEXTENSIBLE*>(m_wfx)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT){
 			m_format = FMT_PCM_F32;
 		}
 		break;
 	}
     LOG_IF(m_format == FMT_INVALID,WARNING) << "Invalid sample format.  Only PCM 16b integer or PCM 32b float are supported.";
-    //FILL IN WITH FFT INITIALIZATION
+    
+	if(m_fftSize){
+		for(int i = 0; i < m_wfx->nChannels;i++){
+			m_fftCfg[i] = kiss_fftr_alloc(m_fftSize, 0, NULL, NULL);
+			m_fftIn[i] = (float*)calloc(m_fftSize * sizeof(float), 1);
+			m_fftOut[i] = (float*)calloc(m_fftSize * sizeof(float),1);
+		}
+
+		m_fftKWdw = (float*)calloc(m_fftSize * sizeof(float), 1);
+		m_fftTmpIn = (float*)calloc(m_fftSize * sizeof(float), 1);
+		m_fftTmpOut = (kiss_fft_cpx*)calloc(m_fftSize * sizeof(kiss_fft_cpx), 1);
+		m_fftBufP = m_fftSize - m_fftOverlap;
+
+		//define windows function for fft
+		for(int i = 0; i < m_fftSize;i++){
+			m_fftKWdw[i] = (float)(0.5 * (1.0 - cos(TWOPI * i / (m_fftSize -1))));
+		}
+	}
+
+	if (m_nBands){
+		m_bandFreq = (float*)malloc(m_nBands * sizeof(float));
+		const double step = (log(m_freqMax / m_freqMin) / m_nBands) / log(2.0);
+		m_bandFreq[0] = (float)(m_freqMin * pow(2.0,step / 2.0));
+
+		for(int i = 0; i< m_nBands; i++){
+			m_bandFreq[i] = (float)(m_bandFreq[i - 1] * pow(2.0,step));
+		}
+
+		for(int i = 0; i < m_wfx->nChannels; i++){
+			m_bandOut[i] = (float*)calloc(m_nBands *  sizeof(float),1);
+		}
+	}
+
     REFERENCE_TIME hnsRequestedDuration = 10000000;
 
     //Audio Client
@@ -100,7 +130,7 @@ HRESULT deviceInit(){
 
     return S_OK;
 }
-
+//change type to double maybe idk probs not lmao
 HRESULT update(){
 	LARGE_INTEGER pcCur;
 	QueryPerformanceCounter(&pcCur);
@@ -152,6 +182,22 @@ HRESULT update(){
 			}
 			if(m_fftSize){
 				LOG(INFO) << "Made it to fft calculations";
+				float* sF32 = (float*) buffer;
+				INT16* sI16 = (INT16*) buffer;
+				const float scalar = (float)(1.0/sqrt(m_fftSize));
+
+				for(unsigned int iFrame = 0; iFrame < nFrames; iFrame++){
+					for(unsigned int iChan = 0; iChan < m_wfx->nChannels;iChan++){
+						//fills temp fft buffer with float values from correct audio format
+						m_fftIn[iChan][m_fftBufW] = m_format == FMT_PCM_F32 ? *sF32++ : (float)*sI16++ * 1.0f / 0x7fff;
+					}
+
+					m_fftBufW = (m_fftBufW + 1) % m_fftSize;
+
+					if(!--m_fftBufP){
+
+					}
+				}
 			}
 			m_clCapture->ReleaseBuffer(nFrames);
 			m_pcFill = pcCur;
@@ -163,8 +209,17 @@ HRESULT update(){
 				//deviceRelease();
 				break;
 		}
+		switch(m_type){
+			case TYPE_RMS:
+				LOG(INFO) << CLAMP01((sqrt(m_rms[0]) + sqrt(m_rms[1])) * 0.5 *m_gainRMS);
+				break;
+			case TYPE_FFT:
+				if(m_clCapture && m_fftSize){
 
-		LOG(INFO) << CLAMP01((sqrt(m_rms[0]) + sqrt(m_rms[1])) * 0.5 *m_gainRMS) << "\n";
+				}
+				break;
+		}
+		
 		
 	}
 	return S_OK;
@@ -178,10 +233,10 @@ void setValues(){
 	for (int iChan = 0; iChan < MAX_CHANNELS; ++iChan){
 			m_rms[iChan] = 0.0;
 			m_peak[iChan] = 0.0;
-			/*m_fftCfg[iChan] = NULL;
+			m_fftCfg[iChan] = NULL;
 			m_fftIn[iChan] = NULL;
 			m_fftOut[iChan] = NULL;
-			m_bandOut[iChan] = NULL;*/
+			m_bandOut[iChan] = NULL;
 	}
 	QueryPerformanceFrequency(&pcFreq);
 	m_pcMult = 1.0 / (double)pcFreq.QuadPart;
@@ -195,6 +250,7 @@ void setValues(){
 	m_fftOverlap = 0;
 	m_nBands = 100;
 	m_gainRMS = 15;
+	m_type = TYPE_RMS;
 	if(m_wfx){
 		const double freq = m_wfx->nSamplesPerSec;
 		m_kRMS[0] = (float) exp(log10(0.01) / (freq * (double) m_envRMS[0] * 0.001));
