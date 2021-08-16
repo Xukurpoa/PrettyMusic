@@ -70,37 +70,7 @@ HRESULT deviceInit(){
 	}
     LOG_IF(m_format == FMT_INVALID,WARNING) << "Invalid sample format.  Only PCM 16b integer or PCM 32b float are supported.";
     
-	if(m_fftSize){
-		for(int i = 0; i < m_wfx->nChannels;i++){
-			m_fftCfg[i] = kiss_fftr_alloc(m_fftSize, 0, NULL, NULL);
-			m_fftIn[i] = (float*)calloc(m_fftSize * sizeof(float), 1);
-			m_fftOut[i] = (float*)calloc(m_fftSize * sizeof(float),1);
-		}
-
-		m_fftKWdw = (float*)calloc(m_fftSize * sizeof(float), 1);
-		m_fftTmpIn = (float*)calloc(m_fftSize * sizeof(float), 1);
-		m_fftTmpOut = (kiss_fft_cpx*)calloc(m_fftSize * sizeof(kiss_fft_cpx), 1);
-		m_fftBufP = m_fftSize - m_fftOverlap;
-
-		//define windows function for fft
-		for(int i = 0; i < m_fftSize;i++){
-			m_fftKWdw[i] = (float)(0.5 * (1.0 - cos(TWOPI * i / (m_fftSize -1))));
-		}
-	}
-
-	if (m_nBands){
-		m_bandFreq = (float*)malloc(m_nBands * sizeof(float));
-		const double step = (log(m_freqMax / m_freqMin) / m_nBands) / log(2.0);
-		m_bandFreq[0] = (float)(m_freqMin * pow(2.0,step / 2.0));
-
-		for(int i = 0; i< m_nBands; i++){
-			m_bandFreq[i] = (float)(m_bandFreq[i - 1] * pow(2.0,step));
-		}
-
-		for(int i = 0; i < m_wfx->nChannels; i++){
-			m_bandOut[i] = (float*)calloc(m_nBands *  sizeof(float),1);
-		}
-	}
+	
 
     REFERENCE_TIME hnsRequestedDuration = 10000000;
 
@@ -194,8 +164,62 @@ HRESULT update(){
 
 					m_fftBufW = (m_fftBufW + 1) % m_fftSize;
 
+					//once buffer is ready to be processed
 					if(!--m_fftBufP){
+						for(unsigned int iChan = 0; iChan < m_wfx->nChannels; iChan++){
+							//Audio Stream has useful outputs/is not just silence
+							if(!(flags & AUDCLNT_BUFFERFLAGS_SILENT)){
+								// copy from the ring buffer to temp space (apparently)
+								memcpy(&m_fftTmpIn[0], &(m_fftIn[iChan])[m_fftBufW], (m_fftSize - m_fftBufW) * sizeof(float));
+								memcpy(&m_fftTmpIn[m_fftSize - m_fftBufW], &m_fftIn[iChan][0], m_fftBufW * sizeof(float));
 
+								for(int iBin = 0; iBin < m_fftSize; iBin++){
+									m_fftTmpIn[iBin] *= m_fftKWdw[iBin];
+								}
+								//Does to FFT from tmpin to tmpout
+								kiss_fftr(m_fftCfg[iChan],m_fftTmpIn,m_fftTmpOut);
+							}
+							else{
+								memset(m_fftTmpOut, 0 ,m_fftSize * sizeof(kiss_fft_cpx));
+							}
+
+							for(int iBin = 0; iBin < m_fftSize; iBin++){
+								float x0 = (m_fftOut[iChan])[iBin];
+								float x1 = (m_fftTmpOut[iBin].r * m_fftTmpOut[iBin].r + m_fftTmpOut[iBin].i * m_fftTmpOut[iBin].i);
+								x0 = x1 + m_kFFT[(x1 < x0)] * (x0 - x1);
+								m_fftOut[iChan][iBin] = x0;
+							}
+						}
+						m_fftBufP = m_fftSize - m_fftOverlap;
+					}
+				}
+				//integrating discrete bands from fft
+				//idk why any of this happens lmao
+				if(m_nBands){
+					const float df = (float)m_wfx->nSamplesPerSec / m_fftSize;
+					const float scalar = 2.0f / (float)m_wfx->nSamplesPerSec;
+					for(unsigned int iChan = 0; iChan < m_wfx->nChannels; iChan++){
+						memset(m_bandOut[iChan], 0, m_nBands * sizeof(float));
+						int iBin = 0;
+						int iBand = 0;
+						float f0 = 0.0f;
+
+						while(iBin <= (m_fftSize / 2) && iBand < m_nBands){
+							float fLin1 = ((float) iBin + 0.5f) * df;
+							float fLog1 = m_bandFreq[iBand];
+							float x = (m_fftOut[iChan])[iBin];
+							float& y = (m_bandOut[iChan])[iBand];
+							if(fLin1 <= fLog1){
+								y += (fLin1 - f0) * x * scalar;
+								f0 = fLin1;
+								iBin += 1;
+							}
+							else{
+								y += (fLog1 - f0) * x * scalar;
+								f0 = fLog1;
+								iBand += 1;
+							}
+						}
 					}
 				}
 			}
@@ -214,8 +238,20 @@ HRESULT update(){
 				LOG(INFO) << CLAMP01((sqrt(m_rms[0]) + sqrt(m_rms[1])) * 0.5 *m_gainRMS);
 				break;
 			case TYPE_FFT:
+			//idk yet lmao
 				if(m_clCapture && m_fftSize){
 
+				}
+				break;
+			case TYPE_BAND:
+				if(m_clCapture && m_fftSize){
+					double x;
+					for(int iBand = 0; iBand < m_nBands; iBand++){
+						x = (m_bandOut[0][iBand] + m_bandOut[1][iBand]) * 0.5;
+						x = CLAMP01(x);
+						x = max(0, 10.0 / m_sensitivity * log10(x) + 1.0);
+						LOG(INFO) << "Values for band " << iBand <<": " << x;
+					}
 				}
 				break;
 		}
@@ -248,17 +284,51 @@ void setValues(){
 	m_envFFT[0] = 50;
 	m_envFFT[1] = 50;
 	m_fftOverlap = 0;
-	m_nBands = 100;
-	m_gainRMS = 15;
-	m_type = TYPE_RMS;
+	m_nBands = 10;
+	m_gainRMS = 2.5;
+	m_type = TYPE_BAND;
+	m_sensitivity = 10.0;
+	m_fftSize = 2048;
+
+	if(m_fftSize){
+		for(int i = 0; i < m_wfx->nChannels;i++){
+			m_fftCfg[i] = kiss_fftr_alloc(m_fftSize, 0, NULL, NULL);
+			m_fftIn[i] = (float*)calloc(m_fftSize * sizeof(float), 1);
+			m_fftOut[i] = (float*)calloc(m_fftSize * sizeof(float),1);
+		}
+
+		m_fftKWdw = (float*)calloc(m_fftSize * sizeof(float), 1);
+		m_fftTmpIn = (float*)calloc(m_fftSize * sizeof(float), 1);
+		m_fftTmpOut = (kiss_fft_cpx*)calloc(m_fftSize * sizeof(kiss_fft_cpx), 1);
+		m_fftBufP = m_fftSize - m_fftOverlap;
+
+		//define windows function for fft
+		for(int i = 0; i < m_fftSize;i++){
+			m_fftKWdw[i] = (float)(0.5 * (1.0 - cos(TWOPI * i / (m_fftSize -1))));
+		}
+	}
+
+	if (m_nBands){
+		m_bandFreq = (float*)malloc(m_nBands * sizeof(float));
+		const double step = (log(m_freqMax / m_freqMin) / m_nBands) / log(2.0);
+		m_bandFreq[0] = (float)(m_freqMin * pow(2.0,step / 2.0));
+
+		for(int i = 1; i< m_nBands; i++){
+			m_bandFreq[i] = (float)(m_bandFreq[i - 1] * pow(2.0,step));
+		}
+
+		for(int i = 0; i < m_wfx->nChannels; i++){
+			m_bandOut[i] = (float*)calloc(m_nBands *  sizeof(float),1);
+		}
+	}
+
 	if(m_wfx){
 		const double freq = m_wfx->nSamplesPerSec;
 		m_kRMS[0] = (float) exp(log10(0.01) / (freq * (double) m_envRMS[0] * 0.001));
 		m_kRMS[1] = (float) exp(log10(0.01) / (freq * (double) m_envRMS[1] * 0.001));
 		m_kPeak[0] = (float) exp(log10(0.01) / (freq * (double) m_envPeak[1] * 0.001));
 		m_kPeak[1] = (float) exp(log10(0.01) / (freq * (double) m_envPeak[1] * 0.001));
-		if (m_fftSize)
-			{
+		if (m_fftSize){
 				m_kFFT[0] = (float) exp(log10(0.01) / (freq / (m_fftSize-m_fftOverlap) * (double)m_envFFT[0] * 0.001));
 				m_kFFT[1] = (float) exp(log10(0.01) / (freq / (m_fftSize-m_fftOverlap) * (double)m_envFFT[1] * 0.001));
 			}

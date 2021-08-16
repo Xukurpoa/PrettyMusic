@@ -97,6 +97,6 @@ int						m_fftBufW;					// write index for input ring buffers
 int						m_fftBufP;					// decremental counter - process FFT at zero
 float*					m_bandOut[MAX_CHANNELS];	// buffer of band values
 float*					m_bandFreq;					// buffer of band max frequencies
-float*					m_bandOut[MAX_CHANNELS];	// buffer of band values
 double					m_freqMin = 20;					// min freq for band measurement
 double					m_freqMax = 20000;					// max freq for band measurement
+double					m_sensitivity;
